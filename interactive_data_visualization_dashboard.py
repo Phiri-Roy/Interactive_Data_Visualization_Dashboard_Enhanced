@@ -52,14 +52,14 @@ try:
     plt.rcParams['figure.figsize'] = (12, 8)
     plt.rcParams['font.size'] = 12
     
-    print("✅ All libraries imported successfully!")
-    print(f"📊 Pandas version: {pd.__version__}")
-    print(f"📈 Matplotlib version: {plt.matplotlib.__version__}")
-    print(f"🎨 Seaborn version: {sns.__version__}")
+    print("[SUCCESS] All libraries imported successfully!")
+    print(f"[INFO] Pandas version: {pd.__version__}")
+    print(f"[INFO] Matplotlib version: {plt.matplotlib.__version__}")
+    print(f"[INFO] Seaborn version: {sns.__version__}")
     print("=" * 60)
     
 except ImportError as e:
-    print(f"❌ Error importing libraries: {e}")
+    print(f"[ERROR] Error importing libraries: {e}")
     print("Please install missing packages using: pip install pandas matplotlib seaborn plotly")
     exit(1)
 
@@ -73,26 +73,26 @@ def load_and_explore_data():
         # Load dataset using seaborn's built-in Titanic dataset
         df = sns.load_dataset('titanic')
         
-        print("✅ Dataset loaded successfully!")
-        print(f"📋 Dataset shape: {df.shape}")
-        print(f"📊 Columns: {list(df.columns)}")
+        print("[SUCCESS] Dataset loaded successfully!")
+        print(f"[DATA] Dataset shape: {df.shape}")
+        print(f"[INFO] Columns: {list(df.columns)}")
         
         # Display first few rows
-        print("\n🔍 First 5 rows of the dataset:")
+        print("\n[ANALYSIS] First 5 rows of the dataset:")
         print(df.head())
         
         # Basic dataset information
-        print("\n📈 Dataset Info:")
+        print("\n[CHART] Dataset Info:")
         print(df.info())
         
         # Display basic statistics
-        print("\n📊 Basic Statistics:")
+        print("\n[INFO] Basic Statistics:")
         print(df.describe())
         
         return df
         
     except Exception as e:
-        print(f"❌ Error loading dataset: {e}")
+        print(f"[ERROR] Error loading dataset: {e}")
         print("Please ensure you have an internet connection to download the dataset.")
         return None
 
@@ -104,11 +104,11 @@ def preprocess_data(df):
     """Clean and preprocess the dataset"""
     try:
         print("\n" + "="*60)
-        print("🔧 DATA PREPROCESSING AND CLEANING")
+        print("[TOOLS] DATA PREPROCESSING AND CLEANING")
         print("="*60)
         
         # Check for missing values
-        print("🔍 Missing values analysis:")
+        print("[ANALYSIS] Missing values analysis:")
         missing_values = df.isnull().sum()
         print(missing_values[missing_values > 0])
         
@@ -121,21 +121,21 @@ def preprocess_data(df):
             median_age = df_clean['age'].median()
             missing_age_count = df['age'].isnull().sum()
             df_clean['age'].fillna(median_age, inplace=True)
-            print(f"✅ Filled {missing_age_count} missing age values with median: {median_age:.1f}")
+            print(f"[SUCCESS] Filled {missing_age_count} missing age values with median: {median_age:.1f}")
         
         # Fill missing fare values with median
         if 'fare' in df_clean.columns:
             median_fare = df_clean['fare'].median()
             missing_fare_count = df['fare'].isnull().sum()
             df_clean['fare'].fillna(median_fare, inplace=True)
-            print(f"✅ Filled {missing_fare_count} missing fare values with median: {median_fare:.2f}")
+            print(f"[SUCCESS] Filled {missing_fare_count} missing fare values with median: {median_fare:.2f}")
         
         # Fill missing embarked values with mode
         if 'embarked' in df_clean.columns:
             mode_embarked = df_clean['embarked'].mode()[0]
             missing_embarked_count = df['embarked'].isnull().sum()
             df_clean['embarked'].fillna(mode_embarked, inplace=True)
-            print(f"✅ Filled {missing_embarked_count} missing embarked values with mode: {mode_embarked}")
+            print(f"[SUCCESS] Filled {missing_embarked_count} missing embarked values with mode: {mode_embarked}")
         
         # Create age groups for better analysis
         df_clean['age_group'] = pd.cut(df_clean['age'], 
@@ -153,14 +153,14 @@ def preprocess_data(df):
                                             bins=[0, 1, 4, 20], 
                                             labels=['Alone', 'Small Family', 'Large Family'])
         
-        print(f"\n✅ Data preprocessing completed successfully!")
-        print(f"📊 Clean dataset shape: {df_clean.shape}")
-        print(f"🔍 Remaining missing values: {df_clean.isnull().sum().sum()}")
+        print(f"\n[SUCCESS] Data preprocessing completed successfully!")
+        print(f"[INFO] Clean dataset shape: {df_clean.shape}")
+        print(f"[ANALYSIS] Remaining missing values: {df_clean.isnull().sum().sum()}")
         
         return df_clean
         
     except Exception as e:
-        print(f"❌ Error during preprocessing: {e}")
+        print(f"[ERROR] Error during preprocessing: {e}")
         return df
 
 # ============================================================================
@@ -171,7 +171,7 @@ def create_bar_chart(df_clean):
     """Create bar chart showing passenger distribution by class"""
     try:
         print("\n" + "="*60)
-        print("📊 VISUALIZATION 1: BAR CHART - PASSENGER DISTRIBUTION BY CLASS")
+        print("[INFO] VISUALIZATION 1: BAR CHART - PASSENGER DISTRIBUTION BY CLASS")
         print("="*60)
         
         # Calculate passenger counts by class
@@ -201,13 +201,13 @@ def create_bar_chart(df_clean):
         # Display the chart
         plt.show()
         
-        print("📊 Bar Chart Analysis:")
+        print("[INFO] Bar Chart Analysis:")
         for class_name, count in class_counts.items():
             percentage = (count / len(df_clean)) * 100
             print(f"   {class_name}: {count} passengers ({percentage:.1f}%)")
         
     except Exception as e:
-        print(f"❌ Error creating bar chart: {e}")
+        print(f"[ERROR] Error creating bar chart: {e}")
 
 # ============================================================================
 # 5. VISUALIZATION 2: INTERACTIVE LINE CHART - AVERAGE FARE BY AGE GROUP (PLOTLY)
@@ -217,7 +217,7 @@ def create_interactive_line_chart(df_clean):
     """Create interactive line chart showing average fare across age groups"""
     try:
         print("\n" + "="*60)
-        print("📈 VISUALIZATION 2: INTERACTIVE LINE CHART - AVERAGE FARE BY AGE GROUP")
+        print("[CHART] VISUALIZATION 2: INTERACTIVE LINE CHART - AVERAGE FARE BY AGE GROUP")
         print("="*60)
         
         # Create age bins for analysis
@@ -269,13 +269,13 @@ def create_interactive_line_chart(df_clean):
         # Display the interactive chart
         fig.show()
         
-        print("📈 Interactive Line Chart Analysis:")
+        print("[CHART] Interactive Line Chart Analysis:")
         print("   Hover over the points to see detailed information!")
         print(f"   Highest average fare: ${fare_by_age['avg_fare'].max():.2f}")
         print(f"   Lowest average fare: ${fare_by_age['avg_fare'].min():.2f}")
         
     except Exception as e:
-        print(f"❌ Error creating interactive line chart: {e}")
+        print(f"[ERROR] Error creating interactive line chart: {e}")
 
 # ============================================================================
 # 6. VISUALIZATION 3: PIE CHART - SURVIVAL DISTRIBUTION (MATPLOTLIB)
@@ -328,13 +328,13 @@ def create_pie_chart(df_clean):
         not_survived = survival_counts[0]
         survival_rate = (survived / total_passengers) * 100
         
-        print("🚢 Survival Analysis:")
+        print("[SHIP] Survival Analysis:")
         print(f"   Total Passengers: {total_passengers}")
         print(f"   Survived: {survived} ({survival_rate:.1f}%)")
         print(f"   Did Not Survive: {not_survived} ({100-survival_rate:.1f}%)")
         
     except Exception as e:
-        print(f"❌ Error creating pie chart: {e}")
+        print(f"[ERROR] Error creating pie chart: {e}")
 
 # ============================================================================
 # 7. VISUALIZATION 4: HEATMAP - CORRELATION MATRIX (SEABORN)
@@ -385,7 +385,7 @@ def create_heatmap(df_clean):
         plt.show()
         
         # Analyze strongest correlations
-        print("🔍 Correlation Analysis:")
+        print("[ANALYSIS] Correlation Analysis:")
         
         # Find strongest positive and negative correlations (excluding self-correlations)
         corr_pairs = []
@@ -405,7 +405,7 @@ def create_heatmap(df_clean):
             print(f"   {i+1}. {var1} ↔ {var2}: {corr:.3f}")
         
     except Exception as e:
-        print(f"❌ Error creating heatmap: {e}")
+        print(f"[ERROR] Error creating heatmap: {e}")
 
 # ============================================================================
 # 8. VISUALIZATION 5: INTERACTIVE SCATTER PLOT - AGE VS FARE (PLOTLY)
@@ -464,7 +464,7 @@ def create_interactive_scatter_plot(df_clean):
         fig.show()
         
         # Statistical analysis
-        print("📊 Scatter Plot Analysis:")
+        print("[INFO] Scatter Plot Analysis:")
         
         # Survival rates by age groups
         age_survival = df_clean.groupby('age_group')['survived'].agg(['count', 'sum', 'mean']).round(3)
@@ -481,7 +481,7 @@ def create_interactive_scatter_plot(df_clean):
         print(f"   Survived: ${fare_stats.loc[1, 'mean']:.2f} (median: ${fare_stats.loc[1, 'median']:.2f})")
         
     except Exception as e:
-        print(f"❌ Error creating interactive scatter plot: {e}")
+        print(f"[ERROR] Error creating interactive scatter plot: {e}")
 
 # ============================================================================
 # 9. COMPREHENSIVE SURVIVAL ANALYSIS
@@ -491,7 +491,7 @@ def comprehensive_survival_analysis(df_clean):
     """Perform comprehensive survival analysis"""
     try:
         print("\n" + "="*60)
-        print("🔍 COMPREHENSIVE SURVIVAL ANALYSIS")
+        print("[ANALYSIS] COMPREHENSIVE SURVIVAL ANALYSIS")
         print("="*60)
         
         # 1. Survival by Gender
@@ -514,7 +514,7 @@ def comprehensive_survival_analysis(df_clean):
         embark_survival = df_clean.groupby('embarked')['survived'].agg(['count', 'sum', 'mean'])
         embark_survival.columns = ['Total', 'Survived', 'Survival_Rate']
         
-        print("\n🚢 Survival by Embarkation Port:")
+        print("\n[SHIP] Survival by Embarkation Port:")
         for port, row in embark_survival.iterrows():
             print(f"   {port}: {row['Survival_Rate']:.1%} ({int(row['Survived'])}/{int(row['Total'])} passengers)")
         
@@ -532,7 +532,7 @@ def comprehensive_survival_analysis(df_clean):
             print(f"   {idx}: {row['mean']:.1%} ({int(row['sum'])}/{int(row['count'])} passengers)")
         
     except Exception as e:
-        print(f"❌ Error in comprehensive analysis: {e}")
+        print(f"[ERROR] Error in comprehensive analysis: {e}")
 
 # ============================================================================
 # 10. MAIN EXECUTION FUNCTION
@@ -540,10 +540,10 @@ def comprehensive_survival_analysis(df_clean):
 
 def main():
     """Main function to execute the complete data visualization dashboard"""
-    print("🚢" * 20)
+    print("[SHIP]" * 20)
     print("INTERACTIVE DATA VISUALIZATION DASHBOARD")
     print("TITANIC DATASET ANALYSIS")
-    print("🚢" * 20)
+    print("[SHIP]" * 20)
     
     # Load and explore data
     df = load_and_explore_data()
@@ -565,7 +565,7 @@ def main():
     
     # Conclusion
     print("\n" + "="*60)
-    print("📋 PROJECT CONCLUSION")
+    print("[DATA] PROJECT CONCLUSION")
     print("="*60)
     print("""
 🎯 KEY FINDINGS:
@@ -575,14 +575,14 @@ def main():
    • Passengers who paid higher fares generally had better survival rates
    • Family size affected survival - small families had better chances than solo travelers
 
-📊 VISUALIZATIONS CREATED:
-   ✅ Bar Chart - Passenger distribution by class (Matplotlib)
-   ✅ Interactive Line Chart - Average fare by age groups (Plotly)
-   ✅ Pie Chart - Overall survival distribution (Matplotlib)
-   ✅ Heatmap - Correlation matrix of numerical features (Seaborn)
-   ✅ Interactive Scatter Plot - Age vs Fare with survival status (Plotly)
+[INFO] VISUALIZATIONS CREATED:
+   [SUCCESS] Bar Chart - Passenger distribution by class (Matplotlib)
+   [SUCCESS] Interactive Line Chart - Average fare by age groups (Plotly)
+   [SUCCESS] Pie Chart - Overall survival distribution (Matplotlib)
+   [SUCCESS] Heatmap - Correlation matrix of numerical features (Seaborn)
+   [SUCCESS] Interactive Scatter Plot - Age vs Fare with survival status (Plotly)
 
-🔧 TECHNICAL ACHIEVEMENTS:
+[TOOLS] TECHNICAL ACHIEVEMENTS:
    • Comprehensive data preprocessing and cleaning
    • Multiple visualization libraries integration
    • Interactive charts with hover functionality
@@ -597,7 +597,7 @@ def main():
    • Add data export functionality
     """)
     
-    print("✅ Dashboard execution completed successfully!")
+    print("[SUCCESS] Dashboard execution completed successfully!")
     print("Thank you for using the Interactive Data Visualization Dashboard! 🎉")
 
 # ============================================================================
