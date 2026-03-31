@@ -1,4 +1,5 @@
 import dash
+import dash_bootstrap_components as dbc
 from dash import dcc, html, Input, Output, callback, State, dash_table
 import plotly.express as px
 import plotly.graph_objects as go
@@ -26,6 +27,9 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import inch
 from reportlab.lib import colors
 import psutil
+import requests
+from requests.adapters import HTTPAdapter
+from requests.packages.urllib3.util.retry import Retry
 
 warnings.filterwarnings('ignore')
 
@@ -84,7 +88,7 @@ def export_charts_as_png(charts_data, data=None, filename="dashboard_charts.png"
         # If no charts available, create a simple data visualization
         if not charts_data or len(charts_data) == 0:
             if data:
-                df = pd.read_json(data, orient='split')
+                df = pd.read_json(io.StringIO(data), orient='split')
                 # Create a simple bar chart of the first numeric column
                 numeric_cols = df.select_dtypes(include=[np.number]).columns
                 if len(numeric_cols) > 0:
@@ -177,7 +181,7 @@ def export_dashboard_as_pdf(data, charts_data, filename="dashboard_report.pdf"):
         # Data summary
         if data:
             try:
-                df = pd.read_json(data, orient='split')
+                df = pd.read_json(io.StringIO(data), orient='split')
                 story.append(Paragraph("Data Summary", heading_style))
                 story.append(Paragraph(f"Dataset contains {len(df):,} rows and {len(df.columns)} columns", styles['Normal']))
                 story.append(Paragraph(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", styles['Normal']))
@@ -220,7 +224,52 @@ def export_dashboard_as_pdf(data, charts_data, filename="dashboard_report.pdf"):
         # Charts section
         if charts_data:
             story.append(Paragraph("Visualizations", heading_style))
-            story.append(Paragraph(f"Dashboard contains {len(charts_data)} interactive charts", styles['Normal']))
+            
+            def extract_figures(children):
+                figures = []
+                if isinstance(children, list):
+                    for child in children:
+                        figures.extend(extract_figures(child))
+                elif isinstance(children, dict):
+                    if children.get('type') == 'Graph' and 'figure' in children.get('props', {}):
+                        figures.append(children['props']['figure'])
+                    elif 'props' in children and 'children' in children['props']:
+                        figures.extend(extract_figures(children['props']['children']))
+                return figures
+                
+            extracted_figs = extract_figures(charts_data)
+            
+            if extracted_figs:
+                story.append(Paragraph(f"Dashboard contains {len(extracted_figs)} charts", styles['Normal']))
+                story.append(Spacer(1, 12))
+                
+                for i, fig_dict in enumerate(extracted_figs):
+                    try:
+                        fig = go.Figure(fig_dict)
+                        # Extract title
+                        title_text = f"Chart {i+1}"
+                        if 'layout' in fig_dict and 'title' in fig_dict['layout']:
+                            title_obj = fig_dict['layout']['title']
+                            if isinstance(title_obj, str):
+                                title_text = title_obj
+                            elif isinstance(title_obj, dict) and 'text' in title_obj:
+                                title_text = title_obj['text']
+                        
+                        story.append(Paragraph(title_text, ParagraphStyle('ChartTitle', parent=styles['Heading3'], spaceAfter=6)))
+                        
+                        # Generate image
+                        img_bytes = pio.to_image(fig, format='png', width=800, height=500, scale=1)
+                        img_buffer = io.BytesIO(img_bytes)
+                        
+                        # Add image to story (scale to fit A4 width: width ~ 450)
+                        img = Image(img_buffer, width=450, height=450 * (500/800))
+                        story.append(img)
+                        story.append(Spacer(1, 24))
+                    except Exception as e:
+                        story.append(Paragraph(f"Error rendering chart {i+1}: {str(e)}", styles['Normal']))
+            else:
+                story.append(Paragraph("No chart objects could be extracted from the dashboard", styles['Normal']))
+            
             story.append(Paragraph("Note: Interactive charts are best viewed in the web dashboard", styles['Normal']))
         else:
             story.append(Paragraph("No charts available", styles['Normal']))
@@ -256,6 +305,28 @@ def export_dashboard_as_pdf(data, charts_data, filename="dashboard_report.pdf"):
             return base64.b64encode(buffer.getvalue()).decode()
         except:
             return None
+
+def create_draggable_chart_container(chart_figure, chart_id, chart_title="Chart"):
+    """Create a draggable container for a chart with drag handle"""
+    return html.Div([
+        # Drag handle
+        html.Div([
+            html.I(className="fas fa-grip-vertical", style={'marginRight': '5px'}),
+            "Drag"
+        ], className='drag-handle'),
+        
+        # Chart content
+        dcc.Graph(
+            figure=chart_figure,
+            config={'displayModeBar': True, 'displaylogo': False},
+            style={'height': '100%'}
+        )
+    ], 
+    id={'type': 'chart-container', 'index': chart_id},
+    className='chart-container',
+    draggable='true',
+    **{'data-chart-id': chart_id}  # Custom data attribute for tracking
+    )
 
 def create_empty_state():
     """Create empty state with instructions when no data is uploaded"""
@@ -694,6 +765,204 @@ def get_performance_metrics():
             'process_memory': 'N/A'
         }
 
+# ============================================================================
+# API INTEGRATION FUNCTIONS
+# ============================================================================
+
+def create_session_with_retries():
+    """Create a requests session with retry logic"""
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        read=3,
+        connect=3,
+        backoff_factor=0.3,
+        status_forcelist=(500, 502, 504)
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
+
+def fetch_api_data(api_url, auth_type='none', api_key='', headers=None, timeout=30):
+    """
+    Fetch data from external API with authentication support
+    
+    Parameters:
+    - api_url: URL of the API endpoint
+    - auth_type: 'none', 'api_key', 'bearer'
+    - api_key: API key or bearer token
+    - headers: Custom headers as dict
+    - timeout: Request timeout in seconds
+    
+    Returns:
+    - DataFrame or error dict
+    """
+    try:
+        session = create_session_with_retries()
+        
+        # Prepare headers
+        request_headers = headers.copy() if headers else {}
+        
+        # Add authentication
+        if auth_type == 'api_key' and api_key:
+            request_headers['X-API-Key'] = api_key
+        elif auth_type == 'bearer' and api_key:
+            request_headers['Authorization'] = f'Bearer {api_key}'
+        
+        # Make request
+        response = session.get(api_url, headers=request_headers, timeout=timeout)
+        response.raise_for_status()
+        
+        # Try to parse response
+        content_type = response.headers.get('Content-Type', '')
+        
+        if 'application/json' in content_type:
+            data = response.json()
+            df = json_to_dataframe(data)
+        elif 'text/csv' in content_type:
+            df = pd.read_csv(io.StringIO(response.text))
+        else:
+            # Try JSON first, then CSV
+            try:
+                data = response.json()
+                df = json_to_dataframe(data)
+            except:
+                try:
+                    df = pd.read_csv(io.StringIO(response.text))
+                except:
+                    return {
+                        'error': True,
+                        'message': f'Unsupported content type: {content_type}'
+                    }
+        
+        if df is None or df.empty:
+            return {
+                'error': True,
+                'message': 'API returned empty data'
+            }
+        
+        return {
+            'error': False,
+            'data': df,
+            'rows': len(df),
+            'columns': len(df.columns)
+        }
+        
+    except requests.exceptions.Timeout:
+        return {
+            'error': True,
+            'message': f'Request timed out after {timeout} seconds'
+        }
+    except requests.exceptions.ConnectionError:
+        return {
+            'error': True,
+            'message': 'Failed to connect to API. Check your internet connection.'
+        }
+    except requests.exceptions.HTTPError as e:
+        return {
+            'error': True,
+            'message': f'HTTP Error {e.response.status_code}: {e.response.reason}'
+        }
+    except Exception as e:
+        return {
+            'error': True,
+            'message': f'Error fetching data: {str(e)}'
+        }
+
+def json_to_dataframe(data):
+    """Convert JSON data to DataFrame, handling nested structures"""
+    try:
+        if isinstance(data, list):
+            # List of objects
+            df = pd.json_normalize(data)
+        elif isinstance(data, dict):
+            # Check if it's a dict with a data key
+            if 'data' in data:
+                df = pd.json_normalize(data['data'])
+            elif 'results' in data:
+                df = pd.json_normalize(data['results'])
+            else:
+                # Try to normalize the dict
+                df = pd.json_normalize(data)
+        else:
+            return None
+        
+        return df
+    except Exception as e:
+        print(f"Error converting JSON to DataFrame: {e}")
+        return None
+
+def test_api_connection(api_url, auth_type='none', api_key='', headers=None):
+    """Test API connection without fetching full data"""
+    try:
+        session = create_session_with_retries()
+        
+        request_headers = headers.copy() if headers else {}
+        
+        if auth_type == 'api_key' and api_key:
+            request_headers['X-API-Key'] = api_key
+        elif auth_type == 'bearer' and api_key:
+            request_headers['Authorization'] = f'Bearer {api_key}'
+        
+        # Make HEAD request first (faster)
+        response = session.head(api_url, headers=request_headers, timeout=10)
+        
+        if response.status_code == 405:  # Method not allowed, try GET
+            response = session.get(api_url, headers=request_headers, timeout=10, stream=True)
+            response.close()
+        
+        response.raise_for_status()
+        
+        return {
+            'success': True,
+            'status_code': response.status_code,
+            'message': 'Connection successful!'
+        }
+        
+    except requests.exceptions.Timeout:
+        return {
+            'success': False,
+            'message': 'Connection timed out'
+        }
+    except requests.exceptions.ConnectionError:
+        return {
+            'success': False,
+            'message': 'Failed to connect to API'
+        }
+    except requests.exceptions.HTTPError as e:
+        return {
+            'success': False,
+            'message': f'HTTP Error {e.response.status_code}'
+        }
+    except Exception as e:
+        return {
+            'success': False,
+            'message': str(e)
+        }
+
+def load_saved_apis():
+    """Load saved API configurations from file"""
+    try:
+        with open('api_config.json', 'r') as f:
+            config = json.load(f)
+            return config.get('saved_apis', [])
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        print(f"Error loading API configs: {e}")
+        return []
+
+def save_api_config(api_configs):
+    """Save API configurations to file"""
+    try:
+        with open('api_config.json', 'w') as f:
+            json.dump({'saved_apis': api_configs}, f, indent=2)
+        return True
+    except Exception as e:
+        print(f"Error saving API configs: {e}")
+        return False
+
 # Dashboard Templates
 DASHBOARD_TEMPLATES = {
     'survival_analysis': {
@@ -751,7 +1020,42 @@ COLORS = {
     'gradient_end': '#764ba2'
 }
 
+# ============================================================================
+# CHART THEME FUNCTIONS
+# ============================================================================
+
+def load_chart_themes():
+    """Load chart themes from JSON file"""
+    try:
+        with open('chart_themes.json', 'r') as f:
+            themes = json.load(f)
+            return themes
+    except FileNotFoundError:
+        # Return default themes if file not found
+        return {
+            "color_schemes": {
+                "default": {
+                    "name": "Default",
+                    "colors": ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd"]
+                }
+            }
+        }
+    except Exception as e:
+        print(f"Error loading chart themes: {e}")
+        return {"color_schemes": {}}
+
+def get_color_schemes():
+    """Get available color schemes"""
+    themes = load_chart_themes()
+    return themes.get('color_schemes', {})
+
+def get_color_scheme_options():
+    """Get color scheme dropdown options"""
+    schemes = get_color_schemes()
+    return [{'label': scheme['name'], 'value': key} for key, scheme in schemes.items()]
+
 external_stylesheets = [
+    dbc.themes.BOOTSTRAP,  # Bootstrap theme
     'https://codepen.io/chriddyp/pen/bWLwgP.css',
     'https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css'
 ]
@@ -793,6 +1097,64 @@ app.index_string = '''
             .metric-card:hover {
                 transform: translateY(-2px);
             }
+            
+            /* Drag and Drop Styles */
+            .charts-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+                gap: 20px;
+                padding: 20px;
+            }
+            
+            .chart-container {
+                background: white;
+                border-radius: 10px;
+                padding: 15px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+                cursor: move;
+                transition: all 0.3s ease;
+                position: relative;
+            }
+            
+            .chart-container:hover {
+                box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+                transform: translateY(-2px);
+            }
+            
+            .chart-container.dragging {
+                opacity: 0.5;
+                transform: rotate(2deg);
+                box-shadow: 0 8px 16px rgba(0,0,0,0.2);
+            }
+            
+            .chart-container.drag-over {
+                border: 2px dashed #2E86AB;
+                background-color: #f0f8ff;
+            }
+            
+            .drag-handle {
+                position: absolute;
+                top: 10px;
+                right: 10px;
+                cursor: move;
+                padding: 5px 10px;
+                background: #2E86AB;
+                color: white;
+                border-radius: 4px;
+                font-size: 12px;
+                opacity: 0.7;
+                transition: opacity 0.2s;
+            }
+            
+            .drag-handle:hover {
+                opacity: 1;
+            }
+            
+            @media (max-width: 768px) {
+                .charts-grid {
+                    grid-template-columns: 1fr;
+                }
+            }
             .chart-btn {
                 transition: opacity 0.2s;
             }
@@ -816,6 +1178,109 @@ app.index_string = '''
                 color: #2E86AB !important;
             }
         </style>
+        <script>
+            // Drag and Drop JavaScript
+            let draggedElement = null;
+            
+            document.addEventListener('DOMContentLoaded', function() {
+                initializeDragAndDrop();
+            });
+            
+            function initializeDragAndDrop() {
+                // Add event listeners to all chart containers
+                const containers = document.querySelectorAll('.chart-container');
+                containers.forEach(container => {
+                    container.addEventListener('dragstart', handleDragStart);
+                    container.addEventListener('dragover', handleDragOver);
+                    container.addEventListener('drop', handleDrop);
+                    container.addEventListener('dragend', handleDragEnd);
+                    container.addEventListener('dragenter', handleDragEnter);
+                    container.addEventListener('dragleave', handleDragLeave);
+                });
+            }
+            
+            function handleDragStart(e) {
+                draggedElement = this;
+                this.classList.add('dragging');
+                e.dataTransfer.effectAllowed = 'move';
+                e.dataTransfer.setData('text/html', this.innerHTML);
+            }
+            
+            function handleDragOver(e) {
+                if (e.preventDefault) {
+                    e.preventDefault();
+                }
+                e.dataTransfer.dropEffect = 'move';
+                return false;
+            }
+            
+            function handleDragEnter(e) {
+                if (this !== draggedElement) {
+                    this.classList.add('drag-over');
+                }
+            }
+            
+            function handleDragLeave(e) {
+                this.classList.remove('drag-over');
+            }
+            
+            function handleDrop(e) {
+                if (e.stopPropagation) {
+                    e.stopPropagation();
+                }
+                
+                if (draggedElement !== this) {
+                    // Get parent container
+                    const parent = this.parentNode;
+                    const allContainers = Array.from(parent.children);
+                    const draggedIndex = allContainers.indexOf(draggedElement);
+                    const targetIndex = allContainers.indexOf(this);
+                    
+                    // Reorder elements
+                    if (draggedIndex < targetIndex) {
+                        parent.insertBefore(draggedElement, this.nextSibling);
+                    } else {
+                        parent.insertBefore(draggedElement, this);
+                    }
+                    
+                    // Save new layout order
+                    saveLayoutOrder();
+                }
+                
+                this.classList.remove('drag-over');
+                return false;
+            }
+            
+            function handleDragEnd(e) {
+                this.classList.remove('dragging');
+                
+                // Remove drag-over class from all containers
+                document.querySelectorAll('.chart-container').forEach(container => {
+                    container.classList.remove('drag-over');
+                });
+            }
+            
+            function saveLayoutOrder() {
+                const containers = document.querySelectorAll('.chart-container');
+                const order = Array.from(containers).map(c => c.getAttribute('data-chart-id'));
+                
+                // Save to localStorage
+                localStorage.setItem('chart-layout-order', JSON.stringify(order));
+                
+                // Trigger Dash callback to update store
+                const event = new CustomEvent('layout-changed', { detail: order });
+                document.dispatchEvent(event);
+            }
+            
+            // Re-initialize when content changes
+            const observer = new MutationObserver(function(mutations) {
+                initializeDragAndDrop();
+            });
+            
+            const config = { childList: true, subtree: true };
+            const targetNode = document.body;
+            observer.observe(targetNode, config);
+        </script>
     </head>
     <body>
         {%app_entry%}
@@ -837,6 +1302,17 @@ app.layout = html.Div([
     dcc.Store(id='stored-data'),
     dcc.Store(id='chart-configs', data={}),
     dcc.Store(id='filter-state', data={}),
+    dcc.Store(id='refresh-settings', data={'enabled': False, 'interval': 30000}),  # 30 seconds default
+    dcc.Store(id='last-refresh-time', data=None),
+    dcc.Store(id='chart-layout', data=[], storage_type='local'),  # Persist layout in localStorage
+    
+    # Auto-refresh interval component
+    dcc.Interval(
+        id='auto-refresh-interval',
+        interval=30000,  # 30 seconds in milliseconds
+        n_intervals=0,
+        disabled=True  # Disabled by default
+    ),
     
     # Header Section
     html.Div([
@@ -1000,7 +1476,181 @@ app.layout = html.Div([
                 html.H4("Performance Monitor", style={'color': COLORS['primary']}),
                 html.Button("Check Performance", id='check-performance-btn', className='export-btn'),
                 html.Div(id='performance-metrics', style={'marginTop': '10px', 'fontSize': '12px'})
+            ]),
+            
+            # Auto-Refresh Panel
+            html.Div(id='refresh-panel', style={'display': 'none'}, children=[
+                html.H4("🔄 Auto-Refresh", style={'color': COLORS['primary']}),
+                html.Div([
+                    html.Label("Enable Auto-Refresh:", style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                    html.Div([
+                        html.Button("OFF", id='refresh-toggle-btn', 
+                                   style={
+                                       'width': '100%',
+                                       'padding': '8px',
+                                       'backgroundColor': COLORS['danger'],
+                                       'color': 'white',
+                                       'border': 'none',
+                                       'borderRadius': '4px',
+                                       'cursor': 'pointer',
+                                       'marginBottom': '10px'
+                                   })
+                    ]),
+                    html.Label("Refresh Interval:", style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                    dcc.Dropdown(
+                        id='refresh-interval-dropdown',
+                        options=[
+                            {'label': '5 seconds', 'value': 5000},
+                            {'label': '10 seconds', 'value': 10000},
+                            {'label': '30 seconds', 'value': 30000},
+                            {'label': '1 minute', 'value': 60000},
+                            {'label': '5 minutes', 'value': 300000}
+                        ],
+                        value=30000,
+                        clearable=False,
+                        style={'marginBottom': '10px'}
+                    ),
+                    html.Hr(style={'margin': '10px 0'}),
+                    html.Div([
+                        html.P("Last Updated:", style={'fontWeight': 'bold', 'marginBottom': '5px', 'fontSize': '12px'}),
+                        html.P(id='last-update-time', children="Never", 
+                              style={'fontSize': '11px', 'color': COLORS['text'], 'fontStyle': 'italic'})
+                    ]),
+                    html.Div([
+                        html.P("Status:", style={'fontWeight': 'bold', 'marginBottom': '5px', 'fontSize': '12px'}),
+                        html.Div(id='refresh-status-indicator', children=[
+                            html.Span("● ", style={'color': COLORS['danger'], 'fontSize': '16px'}),
+                            html.Span("Inactive", style={'fontSize': '11px'})
+                        ])
+                    ])
+                ])
+            ]),
+            
+            # API Data Source Panel
+            html.Div(id='api-panel', style={'display': 'none'}, children=[
+                html.H4("🌐 API Data Source", style={'color': COLORS['primary']}),
+                html.Div([
+                    html.Label("API URL:", style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                    dcc.Input(
+                        id='api-url-input',
+                        type='text',
+                        placeholder='https://api.example.com/data',
+                        style={
+                            'width': '100%',
+                            'padding': '8px',
+                            'marginBottom': '10px',
+                            'borderRadius': '4px',
+                            'border': f'1px solid {COLORS["border"]}'
+                        }
+                    ),
+                    
+                    html.Label("Authentication:", style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                    dcc.Dropdown(
+                        id='api-auth-type',
+                        options=[
+                            {'label': 'No Authentication', 'value': 'none'},
+                            {'label': 'API Key (X-API-Key header)', 'value': 'api_key'},
+                            {'label': 'Bearer Token', 'value': 'bearer'}
+                        ],
+                        value='none',
+                        clearable=False,
+                        style={'marginBottom': '10px'}
+                    ),
+                    
+                    html.Div(id='api-key-container', style={'display': 'none'}, children=[
+                        html.Label("API Key / Token:", style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                        dcc.Input(
+                            id='api-key-input',
+                            type='password',
+                            placeholder='Enter your API key or token',
+                            style={
+                                'width': '100%',
+                                'padding': '8px',
+                                'marginBottom': '10px',
+                                'borderRadius': '4px',
+                                'border': f'1px solid {COLORS["border"]}'
+                            }
+                        )
+                    ]),
+                    
+                    html.Hr(style={'margin': '15px 0'}),
+                    
+                    html.Div([
+                        html.Button(
+                            "Test Connection",
+                            id='test-api-btn',
+                            style={
+                                'width': '48%',
+                                'padding': '8px',
+                                'backgroundColor': COLORS['info'],
+                                'color': 'white',
+                                'border': 'none',
+                                'borderRadius': '4px',
+                                'cursor': 'pointer',
+                                'marginRight': '4%'
+                            }
+                        ),
+                        html.Button(
+                            "Fetch Data",
+                            id='fetch-api-btn',
+                            style={
+                                'width': '48%',
+                                'padding': '8px',
+                                'backgroundColor': COLORS['primary'],
+                                'color': 'white',
+                                'border': 'none',
+                                'borderRadius': '4px',
+                                'cursor': 'pointer'
+                            }
+                        )
+                    ], style={'display': 'flex', 'marginBottom': '10px'}),
+                    
+                    html.Div(id='api-status-message', style={
+                        'marginTop': '10px',
+                        'padding': '10px',
+                        'borderRadius': '4px',
+                        'fontSize': '12px',
+                        'display': 'none'
+                    }),
+                    
+                    html.Hr(style={'margin': '15px 0'}),
+                    
+                    html.Label("Saved APIs:", style={'fontWeight': 'bold', 'marginBottom': '5px'}),
+                    dcc.Dropdown(
+                        id='saved-apis-dropdown',
+                        options=[],
+                        placeholder='Select a saved API',
+                        style={'marginBottom': '10px'}
+                    )
+                ])
+            ]),
+            
+            # Layout Controls Panel
+            html.Div(id='layout-controls-panel', style={'display': 'none'}, children=[
+                html.H4([
+                    html.I(className="fas fa-th", style={'marginRight': '10px'}),
+                    "Layout Controls"
+                ], style={'color': COLORS['primary'], 'borderBottom': f'2px solid {COLORS["primary"]}', 'paddingBottom': '10px'}),
+                
+                html.Div([
+                    html.P("Drag charts to rearrange. Layout saves automatically.", 
+                          style={'fontSize': '14px', 'color': COLORS['text'], 'marginBottom': '15px'}),
+                    
+                    html.Button([
+                        html.I(className="fas fa-undo", style={'marginRight': '8px'}),
+                        "Reset Layout"
+                    ], id='reset-layout-btn', className='stats-btn'),
+                    
+                    html.Div(id='layout-status', style={
+                        'marginTop': '10px',
+                        'padding': '10px',
+                        'borderRadius': '4px',
+                        'fontSize': '12px',
+                        'display': 'none'
+                    })
+                ])
             ])
+
             
         ], className='twelve columns', style={'backgroundColor': COLORS['card'], 'padding': '20px', 'borderRadius': '10px', 'margin': '10px', 'boxShadow': '0 2px 4px rgba(0,0,0,0.1)'}),
         
@@ -1018,10 +1668,195 @@ app.layout = html.Div([
     
     # Chart Editing Modal
     dcc.ConfirmDialog(
-        id='chart-edit-modal',
+        id='chart-edit-confirm-dialog',
         message='Chart editing functionality will be implemented here.',
         displayed=False
     ),
+    
+    # Bootstrap Modal for Chart Editing
+    dbc.Modal([
+        dbc.ModalHeader(dbc.ModalTitle("Edit Chart", id='modal-chart-title')),
+        dbc.ModalBody([
+            dbc.Tabs([
+                # Basic Tab
+                dbc.Tab(label="Basic", tab_id="tab-basic", children=[
+                    html.Div([
+                        html.Label("Chart Title:", className="mt-3"),
+                        dbc.Input(id='edit-chart-title', type='text', placeholder='Enter chart title'),
+                        
+                        html.Label("X-Axis Label:", className="mt-3"),
+                        dbc.Input(id='edit-x-label', type='text', placeholder='Enter X-axis label'),
+                        
+                        html.Label("Y-Axis Label:", className="mt-3"),
+                        dbc.Input(id='edit-y-label', type='text', placeholder='Enter Y-axis label'),
+                        
+                        html.Label("Chart Type:", className="mt-3"),
+                        dbc.Select(
+                            id='edit-chart-type',
+                            options=[
+                                {'label': 'Scatter Plot', 'value': 'scatter'},
+                                {'label': 'Bar Chart', 'value': 'bar'},
+                                {'label': 'Line Chart', 'value': 'line'},
+                                {'label': 'Histogram', 'value': 'histogram'},
+                                {'label': 'Box Plot', 'value': 'box'},
+                                {'label': 'Violin Plot', 'value': 'violin'},
+                                {'label': 'Pie Chart', 'value': 'pie'},
+                                {'label': 'Heatmap', 'value': 'heatmap'},
+                                {'label': 'Area Chart', 'value': 'area'},
+                            ]
+                        )
+                    ])
+                ]),
+                
+                # Colors Tab
+                dbc.Tab(label="Colors", tab_id="tab-colors", children=[
+                    html.Div([
+                        html.Label("Color Scheme:", className="mt-3"),
+                        dbc.Select(
+                            id='edit-color-scheme',
+                            options=get_color_scheme_options()
+                        ),
+                        
+                        html.Div(id='color-preview', className="mt-3", style={
+                            'padding': '20px',
+                            'borderRadius': '5px',
+                            'border': '1px solid #ddd'
+                        }),
+                        
+                        html.Label("Background Color:", className="mt-3"),
+                        dbc.Input(id='edit-bg-color', type='color', value='#FFFFFF'),
+                        
+                        html.Label("Plot Background Color:", className="mt-3"),
+                        dbc.Input(id='edit-plot-bg-color', type='color', value='#FFFFFF'),
+                    ])
+                ]),
+                
+                # Axes Tab
+                dbc.Tab(label="Axes", tab_id="tab-axes", children=[
+                    html.Div([
+                        html.H6("X-Axis", className="mt-3"),
+                        html.Label("Min Value:"),
+                        dbc.Input(id='edit-x-min', type='number', placeholder='Auto'),
+                        
+                        html.Label("Max Value:", className="mt-2"),
+                        dbc.Input(id='edit-x-max', type='number', placeholder='Auto'),
+                        
+                        html.Label("Scale Type:", className="mt-2"),
+                        dbc.Select(
+                            id='edit-x-scale',
+                            options=[
+                                {'label': 'Linear', 'value': 'linear'},
+                                {'label': 'Logarithmic', 'value': 'log'}
+                            ],
+                            value='linear'
+                        ),
+                        
+                        dbc.Checkbox(id='edit-x-gridlines', label="Show Gridlines", value=True, className="mt-2"),
+                        
+                        html.Hr(),
+                        html.H6("Y-Axis", className="mt-3"),
+                        html.Label("Min Value:"),
+                        dbc.Input(id='edit-y-min', type='number', placeholder='Auto'),
+                        
+                        html.Label("Max Value:", className="mt-2"),
+                        dbc.Input(id='edit-y-max', type='number', placeholder='Auto'),
+                        
+                        html.Label("Scale Type:", className="mt-2"),
+                        dbc.Select(
+                            id='edit-y-scale',
+                            options=[
+                                {'label': 'Linear', 'value': 'linear'},
+                                {'label': 'Logarithmic', 'value': 'log'}
+                            ],
+                            value='linear'
+                        ),
+                        
+                        dbc.Checkbox(id='edit-y-gridlines', label="Show Gridlines", value=True, className="mt-2"),
+                    ])
+                ]),
+                
+                # Legend Tab
+                dbc.Tab(label="Legend", tab_id="tab-legend", children=[
+                    html.Div([
+                        dbc.Checkbox(id='edit-show-legend', label="Show Legend", value=True, className="mt-3"),
+                        
+                        html.Label("Position:", className="mt-3"),
+                        dbc.Select(
+                            id='edit-legend-position',
+                            options=[
+                                {'label': 'Top', 'value': 'top'},
+                                {'label': 'Bottom', 'value': 'bottom'},
+                                {'label': 'Left', 'value': 'left'},
+                                {'label': 'Right', 'value': 'right'},
+                                {'label': 'Top Left', 'value': 'top left'},
+                                {'label': 'Top Right', 'value': 'top right'},
+                                {'label': 'Bottom Left', 'value': 'bottom left'},
+                                {'label': 'Bottom Right', 'value': 'bottom right'},
+                            ],
+                            value='top right'
+                        ),
+                        
+                        html.Label("Orientation:", className="mt-3"),
+                        dbc.Select(
+                            id='edit-legend-orientation',
+                            options=[
+                                {'label': 'Vertical', 'value': 'v'},
+                                {'label': 'Horizontal', 'value': 'h'}
+                            ],
+                            value='v'
+                        ),
+                        
+                        html.Label("Background Color:", className="mt-3"),
+                        dbc.Input(id='edit-legend-bg', type='color', value='#FFFFFF'),
+                        
+                        html.Label("Border Color:", className="mt-3"),
+                        dbc.Input(id='edit-legend-border', type='color', value='#000000'),
+                    ])
+                ]),
+                
+                # Advanced Tab
+                dbc.Tab(label="Advanced", tab_id="tab-advanced", children=[
+                    html.Div([
+                        html.Label("Font Size:", className="mt-3"),
+                        dbc.Input(id='edit-font-size', type='number', value=12, min=8, max=24),
+                        
+                        html.Label("Title Font Size:", className="mt-3"),
+                        dbc.Input(id='edit-title-font-size', type='number', value=16, min=10, max=32),
+                        
+                        html.Hr(),
+                        html.H6("Margins", className="mt-3"),
+                        
+                        html.Label("Top:"),
+                        dbc.Input(id='edit-margin-top', type='number', value=80, min=0),
+                        
+                        html.Label("Bottom:", className="mt-2"),
+                        dbc.Input(id='edit-margin-bottom', type='number', value=80, min=0),
+                        
+                        html.Label("Left:", className="mt-2"),
+                        dbc.Input(id='edit-margin-left', type='number', value=80, min=0),
+                        
+                        html.Label("Right:", className="mt-2"),
+                        dbc.Input(id='edit-margin-right', type='number', value=80, min=0),
+                        
+                        html.Hr(),
+                        html.Label("Chart Height (px):", className="mt-3"),
+                        dbc.Input(id='edit-chart-height', type='number', value=600, min=300, max=1200),
+                        
+                        html.Label("Chart Width (px):", className="mt-3"),
+                        dbc.Input(id='edit-chart-width', type='number', value=800, min=400, max=1600),
+                    ])
+                ])
+            ], id="chart-edit-tabs", active_tab="tab-basic")
+        ]),
+        dbc.ModalFooter([
+            dbc.Button("Reset to Default", id="reset-chart-btn", color="secondary", className="me-2"),
+            dbc.Button("Cancel", id="cancel-edit-btn", color="secondary", className="me-2"),
+            dbc.Button("Apply Changes", id="apply-chart-btn", color="primary")
+        ])
+    ], id="chart-edit-modal", size="lg", is_open=False),
+    
+    # Store for current chart being edited
+    dcc.Store(id='editing-chart-id', data=None),
     
     # Footer
     html.Div([
@@ -1093,6 +1928,8 @@ def parse_contents(contents, filename):
     Output('ml-panel', 'style'),
     Output('export-panel', 'style'),
     Output('performance-panel', 'style'),
+    Output('refresh-panel', 'style'),  # Added refresh panel
+    Output('api-panel', 'style'),  # Added API panel
     Output('x-axis-dropdown', 'options'),
     Output('y-axis-dropdown', 'options'),
     Output('color-dropdown', 'options'),
@@ -1130,6 +1967,8 @@ def update_store(contents, filename):
                    {'display': 'block'},
                    {'display': 'block'},
                    {'display': 'block'},
+                   {'display': 'block'},  # refresh-panel
+                   {'display': 'block'},  # api-panel
                    options, options, options, options, success_message)
         else:
             # Show error message
@@ -1140,14 +1979,14 @@ def update_store(contents, filename):
                              style={'color': COLORS['danger'], 'fontWeight': 'bold'})
                 ], style={'display': 'flex', 'alignItems': 'center', 'justifyContent': 'center', 'padding': '20px'})
             ])
-            return (None, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, [], [], [], [], error_message)
+            return (None, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, [], [], [], [], error_message)
     
     # Default state
     default_message = html.Div([
         html.P('📊 Ready to upload your data or use the sample dataset', 
               style={'color': COLORS['text'], 'textAlign': 'center'})
     ])
-    return None, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, [], [], [], [], default_message
+    return None, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, [], [], [], [], default_message
 
 # Removed duplicate callback - now handled in update_store
 
@@ -1157,7 +1996,7 @@ def update_store(contents, filename):
 )
 def display_data_preview(data):
     if data is not None:
-        df = pd.read_json(data, orient='split')
+        df = pd.read_json(io.StringIO(data), orient='split')
         return html.Div([
             html.H4("Data Preview", style={'color': COLORS['primary']}),
             html.P(f"Shape: {df.shape[0]:,} rows × {df.shape[1]} columns"),
@@ -1221,7 +2060,7 @@ def display_data_preview(data):
 )
 def update_metrics(data):
     if data is not None:
-        df = pd.read_json(data, orient='split')
+        df = pd.read_json(io.StringIO(data), orient='split')
         return generate_metrics_cards(df)
     return html.Div()
 
@@ -1240,7 +2079,7 @@ def update_main_content(data):
 )
 def update_filter_controls(data):
     if data is not None:
-        df = pd.read_json(data, orient='split')
+        df = pd.read_json(io.StringIO(data), orient='split')
         return create_filter_controls(df)
     return html.Div()
 
@@ -1258,7 +2097,7 @@ def generate_statistical_analysis(corr_clicks, desc_clicks, dist_clicks, missing
         return html.Div()
     
     button_id = ctx.triggered[0]['prop_id'].split('.')[0]
-    df = pd.read_json(data, orient='split')
+    df = pd.read_json(io.StringIO(data), orient='split')
     
     if button_id == 'correlation-btn':
         return perform_correlation_analysis(df)
@@ -1288,7 +2127,7 @@ def generate_ml_analysis(predict_clicks, cluster_clicks, feature_clicks, pca_cli
         return html.Div()
     
     button_id = ctx.triggered[0]['prop_id'].split('.')[0]
-    df = pd.read_json(data, orient='split')
+    df = pd.read_json(io.StringIO(data), orient='split')
     
     if button_id == 'predict-btn':
         return perform_prediction_analysis(df)
@@ -1315,7 +2154,7 @@ def apply_filters(n_clicks, data, filter_controls):
     if not n_clicks or not data:
         return html.Div(), data
     
-    df = pd.read_json(data, orient='split')
+    df = pd.read_json(io.StringIO(data), orient='split')
     original_count = len(df)
     
     # Apply filters based on filter controls
@@ -1413,7 +2252,7 @@ def load_dashboard_template(n_clicks, selected_template, data):
     if selected_template not in DASHBOARD_TEMPLATES:
         return []
     
-    df = pd.read_json(data, orient='split')
+    df = pd.read_json(io.StringIO(data), orient='split')
     template = DASHBOARD_TEMPLATES[selected_template]
     charts = []
     
@@ -1480,18 +2319,28 @@ def load_dashboard_template(n_clicks, selected_template, data):
     Input('export-csv-btn', 'n_clicks'),
     State('stored-data', 'data'),
     State('charts-container', 'children'),
+    State('stats-output', 'children'),
+    State('ml-output', 'children'),
     prevent_initial_call=True
 )
-def handle_export(pdf_clicks, png_clicks, csv_clicks, data, charts):
+def handle_export(pdf_clicks, png_clicks, csv_clicks, data, charts, stats, ml):
     ctx = dash.callback_context
     if not ctx.triggered:
         return html.Div()
     
     button_id = ctx.triggered[0]['prop_id'].split('.')[0]
     
+    all_charts = []
+    for container in [charts, stats, ml]:
+        if container:
+            if isinstance(container, list):
+                all_charts.extend(container)
+            else:
+                all_charts.append(container)
+    
     if button_id == 'export-pdf-btn' and pdf_clicks:
         try:
-            pdf_data = export_dashboard_as_pdf(data, charts)
+            pdf_data = export_dashboard_as_pdf(data, all_charts)
             if pdf_data:
                 return html.Div([
                     html.Div([
@@ -1527,7 +2376,7 @@ def handle_export(pdf_clicks, png_clicks, csv_clicks, data, charts):
             ])
     elif button_id == 'export-png-btn' and png_clicks:
         try:
-            png_data = export_charts_as_png(charts, data)
+            png_data = export_charts_as_png(all_charts, data)
             if png_data:
                 return html.Div([
                     html.Div([
@@ -1562,7 +2411,7 @@ def handle_export(pdf_clicks, png_clicks, csv_clicks, data, charts):
                 ], style={'display': 'flex', 'alignItems': 'center', 'padding': '15px', 'backgroundColor': COLORS['light'], 'borderRadius': '8px', 'border': f'1px solid {COLORS["border"]}'})
             ])
     elif button_id == 'export-csv-btn' and csv_clicks and data:
-        df = pd.read_json(data, orient='split')
+        df = pd.read_json(io.StringIO(data), orient='split')
         csv_string = df.to_csv(index=False)
         return html.Div([
             html.Div([
@@ -1589,7 +2438,7 @@ def handle_export(pdf_clicks, png_clicks, csv_clicks, data, charts):
 )
 def download_csv(n_clicks, data):
     if n_clicks and data:
-        df = pd.read_json(data, orient='split')
+        df = pd.read_json(io.StringIO(data), orient='split')
         csv_string = df.to_csv(index=False)
         return dict(content=csv_string, filename="dashboard_data.csv")
     return None
@@ -1599,27 +2448,45 @@ def download_csv(n_clicks, data):
     Input('download-pdf-btn', 'n_clicks'),
     State('stored-data', 'data'),
     State('charts-container', 'children'),
+    State('stats-output', 'children'),
+    State('ml-output', 'children'),
     prevent_initial_call=True
 )
-def download_pdf(n_clicks, data, charts):
+def download_pdf(n_clicks, data, charts, stats, ml):
     if n_clicks and data:
-        pdf_data = export_dashboard_as_pdf(data, charts)
+        all_charts = []
+        for container in [charts, stats, ml]:
+            if container:
+                if isinstance(container, list):
+                    all_charts.extend(container)
+                else:
+                    all_charts.append(container)
+        pdf_data = export_dashboard_as_pdf(data, all_charts)
         if pdf_data:
-            return dict(content=pdf_data, filename="dashboard_report.pdf")
+            return dict(content=pdf_data, filename="dashboard_report.pdf", base64=True)
     return None
 
 @app.callback(
     Output('download-png', 'data'),
     Input('download-png-btn', 'n_clicks'),
     State('charts-container', 'children'),
+    State('stats-output', 'children'),
+    State('ml-output', 'children'),
     State('stored-data', 'data'),
     prevent_initial_call=True
 )
-def download_png(n_clicks, charts, data):
+def download_png(n_clicks, charts, stats, ml, data):
     if n_clicks:
-        png_data = export_charts_as_png(charts, data)
+        all_charts = []
+        for container in [charts, stats, ml]:
+            if container:
+                if isinstance(container, list):
+                    all_charts.extend(container)
+                else:
+                    all_charts.append(container)
+        png_data = export_charts_as_png(all_charts, data)
         if png_data:
-            return dict(content=png_data, filename="dashboard_charts.png")
+            return dict(content=png_data, filename="dashboard_charts.png", base64=True)
     return None
 
 @app.callback(
@@ -1708,7 +2575,7 @@ def check_performance(n_clicks):
 
 def get_df(data):
     if data is not None:
-        return pd.read_json(data, orient='split')
+        return pd.read_json(io.StringIO(data), orient='split')
     return load_and_preprocess_data()
 
 @app.callback(
@@ -1805,6 +2672,414 @@ def add_chart(n_clicks, existing_children, data, chart_type, x_axis, y_axis, col
         
     existing_children.append(chart_container)
     return existing_children
+
+# ============================================================================
+# AUTO-REFRESH CALLBACKS
+# ============================================================================
+
+# Callback to toggle auto-refresh on/off
+@app.callback(
+    Output('refresh-settings', 'data'),
+    Output('refresh-toggle-btn', 'children'),
+    Output('refresh-toggle-btn', 'style'),
+    Output('auto-refresh-interval', 'disabled'),
+    Output('refresh-status-indicator', 'children'),
+    Input('refresh-toggle-btn', 'n_clicks'),
+    State('refresh-settings', 'data'),
+    State('refresh-interval-dropdown', 'value'),
+    prevent_initial_call=True
+)
+def toggle_refresh(n_clicks, current_settings, interval_value):
+    """Toggle auto-refresh on/off"""
+    if current_settings is None:
+        current_settings = {'enabled': False, 'interval': 30000}
+    
+    # Toggle the enabled state
+    new_enabled = not current_settings.get('enabled', False)
+    new_settings = {'enabled': new_enabled, 'interval': interval_value}
+    
+    if new_enabled:
+        # Refresh is ON
+        button_text = "ON"
+        button_style = {
+            'width': '100%',
+            'padding': '8px',
+            'backgroundColor': COLORS['success'],
+            'color': 'white',
+            'border': 'none',
+            'borderRadius': '4px',
+            'cursor': 'pointer',
+            'marginBottom': '10px'
+        }
+        status_indicator = [
+            html.Span("● ", style={'color': COLORS['success'], 'fontSize': '16px'}),
+            html.Span("Active", style={'fontSize': '11px'})
+        ]
+        interval_disabled = False
+    else:
+        # Refresh is OFF
+        button_text = "OFF"
+        button_style = {
+            'width': '100%',
+            'padding': '8px',
+            'backgroundColor': COLORS['danger'],
+            'color': 'white',
+            'border': 'none',
+            'borderRadius': '4px',
+            'cursor': 'pointer',
+            'marginBottom': '10px'
+        }
+        status_indicator = [
+            html.Span("● ", style={'color': COLORS['danger'], 'fontSize': '16px'}),
+            html.Span("Inactive", style={'fontSize': '11px'})
+        ]
+        interval_disabled = True
+    
+    return new_settings, button_text, button_style, interval_disabled, status_indicator
+
+# Callback to update interval when dropdown changes
+@app.callback(
+    Output('auto-refresh-interval', 'interval'),
+    Input('refresh-interval-dropdown', 'value'),
+    prevent_initial_call=True
+)
+def update_interval(interval_value):
+    """Update the refresh interval"""
+    return interval_value
+
+# Callback to handle data refresh
+@app.callback(
+    Output('last-update-time', 'children'),
+    Output('stored-data', 'data', allow_duplicate=True),
+    Input('auto-refresh-interval', 'n_intervals'),
+    State('stored-data', 'data'),
+    State('refresh-settings', 'data'),
+    prevent_initial_call=True
+)
+def refresh_data(n_intervals, current_data, refresh_settings):
+    """Refresh data at specified intervals"""
+    from datetime import datetime
+    
+    # Check if refresh is enabled
+    if refresh_settings is None or not refresh_settings.get('enabled', False):
+        return dash.no_update, dash.no_update
+    
+    # Check if we have data to refresh
+    if current_data is None:
+        return dash.no_update, dash.no_update
+    
+    # Get current timestamp
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    # In a real application, you would reload data from source here
+    # For now, we'll just update the timestamp to show refresh is working
+    # The data remains the same unless you implement actual data source refresh
+    
+    # Return updated timestamp and keep the same data
+    # (In production, you'd fetch new data from API/database here)
+    return timestamp, current_data
+
+# ============================================================================
+# API INTEGRATION CALLBACKS
+# ============================================================================
+
+# Callback to show/hide API key input based on auth type
+@app.callback(
+    Output('api-key-container', 'style'),
+    Input('api-auth-type', 'value')
+)
+def toggle_api_key_input(auth_type):
+    """Show/hide API key input based on authentication type"""
+    if auth_type in ['api_key', 'bearer']:
+        return {'display': 'block'}
+    return {'display': 'none'}
+
+# Callback to test API connection
+@app.callback(
+    Output('api-status-message', 'children'),
+    Output('api-status-message', 'style'),
+    Input('test-api-btn', 'n_clicks'),
+    State('api-url-input', 'value'),
+    State('api-auth-type', 'value'),
+    State('api-key-input', 'value'),
+    prevent_initial_call=True
+)
+def test_api(n_clicks, api_url, auth_type, api_key):
+    """Test API connection"""
+    if not api_url:
+        return "Please enter an API URL", {
+            'display': 'block',
+            'backgroundColor': COLORS['warning'],
+            'color': 'white',
+            'padding': '10px',
+            'borderRadius': '4px',
+            'fontSize': '12px'
+        }
+    
+    result = test_api_connection(api_url, auth_type, api_key)
+    
+    if result['success']:
+        return f"✅ {result['message']}", {
+            'display': 'block',
+            'backgroundColor': COLORS['success'],
+            'color': 'white',
+            'padding': '10px',
+            'borderRadius': '4px',
+            'fontSize': '12px'
+        }
+    else:
+        return f"❌ {result['message']}", {
+            'display': 'block',
+            'backgroundColor': COLORS['danger'],
+            'color': 'white',
+            'padding': '10px',
+            'borderRadius': '4px',
+            'fontSize': '12px'
+        }
+
+# Callback to fetch data from API
+@app.callback(
+    Output('stored-data', 'data', allow_duplicate=True),
+    Output('control-panel-container', 'style', allow_duplicate=True),
+    Output('data-preview-container', 'style', allow_duplicate=True),
+    Output('filter-panel', 'style', allow_duplicate=True),
+    Output('templates-panel', 'style', allow_duplicate=True),
+    Output('stats-panel', 'style', allow_duplicate=True),
+    Output('ml-panel', 'style', allow_duplicate=True),
+    Output('export-panel', 'style', allow_duplicate=True),
+    Output('performance-panel', 'style', allow_duplicate=True),
+    Output('refresh-panel', 'style', allow_duplicate=True),
+    Output('api-panel', 'style', allow_duplicate=True),
+    Output('x-axis-dropdown', 'options', allow_duplicate=True),
+    Output('y-axis-dropdown', 'options', allow_duplicate=True),
+    Output('color-dropdown', 'options', allow_duplicate=True),
+    Output('size-dropdown', 'options', allow_duplicate=True),
+    Output('output-data-upload', 'children', allow_duplicate=True),
+    Input('fetch-api-btn', 'n_clicks'),
+    State('api-url-input', 'value'),
+    State('api-auth-type', 'value'),
+    State('api-key-input', 'value'),
+    prevent_initial_call=True
+)
+def fetch_from_api(n_clicks, api_url, auth_type, api_key):
+    """Fetch data from API and load into dashboard"""
+    if not api_url:
+        error_msg = html.Div([
+            html.I(className="fas fa-exclamation-triangle", style={'color': COLORS['danger'], 'fontSize': '20px', 'marginRight': '10px'}),
+            html.Span("Please enter an API URL", style={'color': COLORS['danger'], 'fontWeight': 'bold'})
+        ], style={'display': 'flex', 'alignItems': 'center', 'justifyContent': 'center', 'padding': '20px'})
+        return (dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, 
+                dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update,
+                dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, error_msg)
+    
+    # Show loading message
+    loading_msg = html.Div([
+        html.Div(className="spinner-border text-primary", role="status", style={'width': '20px', 'height': '20px', 'marginRight': '10px'}),
+        html.Span("Fetching data from API...", style={'color': COLORS['primary'], 'fontWeight': 'bold'})
+    ], style={'display': 'flex', 'alignItems': 'center', 'justifyContent': 'center', 'padding': '20px'})
+    
+    # Fetch data
+    result = fetch_api_data(api_url, auth_type, api_key)
+    
+    if result['error']:
+        error_msg = html.Div([
+            html.I(className="fas fa-exclamation-triangle", style={'color': COLORS['danger'], 'fontSize': '20px', 'marginRight': '10px'}),
+            html.Span(f"❌ {result['message']}", style={'color': COLORS['danger'], 'fontWeight': 'bold'})
+        ], style={'display': 'flex', 'alignItems': 'center', 'justifyContent': 'center', 'padding': '20px'})
+        return (dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update,
+                dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update,
+                dash.no_update, dash.no_update, dash.no_update, dash.no_update, dash.no_update, error_msg)
+    
+    # Success - load data
+    df = result['data']
+    options = [{'label': col, 'value': col} for col in df.columns]
+    
+    success_msg = html.Div([
+        html.I(className="fas fa-check-circle", style={'color': COLORS['success'], 'fontSize': '20px', 'marginRight': '10px'}),
+        html.Span(f"✅ Data fetched successfully! {result['rows']:,} rows × {result['columns']} columns", 
+                 style={'color': COLORS['success'], 'fontWeight': 'bold'})
+    ], style={'display': 'flex', 'alignItems': 'center', 'justifyContent': 'center', 'padding': '20px'})
+    
+    return (df.to_json(date_format='iso', orient='split'),
+            {'display': 'block'}, {'display': 'block'}, {'display': 'block'},
+            {'display': 'block'}, {'display': 'block'}, {'display': 'block'},
+            {'display': 'block'}, {'display': 'block'}, {'display': 'block'},
+            {'display': 'block'},
+            options, options, options, options, success_msg)
+
+# Callback to load saved APIs dropdown
+@app.callback(
+    Output('saved-apis-dropdown', 'options'),
+    Input('api-panel', 'style')
+)
+def load_saved_apis_dropdown(panel_style):
+    """Load saved API configurations into dropdown"""
+    if panel_style and panel_style.get('display') == 'block':
+        saved_apis = load_saved_apis()
+        return [{'label': api['name'], 'value': i} for i, api in enumerate(saved_apis)]
+    return []
+
+# Callback to populate fields from saved API
+@app.callback(
+    Output('api-url-input', 'value'),
+    Output('api-auth-type', 'value'),
+    Output('api-key-input', 'value'),
+    Input('saved-apis-dropdown', 'value'),
+    prevent_initial_call=True
+)
+def load_saved_api(selected_index):
+    """Load selected saved API configuration"""
+    if selected_index is None:
+        return dash.no_update, dash.no_update, dash.no_update
+    
+    saved_apis = load_saved_apis()
+    if selected_index < len(saved_apis):
+        api = saved_apis[selected_index]
+        return api['url'], api['auth_type'], api.get('api_key', '')
+    
+    return dash.no_update, dash.no_update, dash.no_update
+
+# ============================================================================
+# CHART EDITING MODAL CALLBACKS
+# ============================================================================
+
+# Callback to show color preview
+@app.callback(
+    Output('color-preview', 'children'),
+    Input('edit-color-scheme', 'value')
+)
+def update_color_preview(scheme_key):
+    """Show preview of selected color scheme"""
+    if not scheme_key:
+        return "Select a color scheme to preview"
+    
+    schemes = get_color_schemes()
+    if scheme_key not in schemes:
+        return "Color scheme not found"
+    
+    colors = schemes[scheme_key]['colors']
+    
+    # Create color swatches
+    swatches = []
+    for color in colors[:10]:
+        swatches.append(
+            html.Div(style={
+                'width': '40px',
+                'height': '40px',
+                'backgroundColor': color,
+                'display': 'inline-block',
+                'margin': '5px',
+                'borderRadius': '4px',
+                'border': '1px solid #ddd'
+            })
+        )
+    
+    return html.Div(swatches)
+
+# Callback to close modal
+@app.callback(
+    Output('chart-edit-modal', 'is_open'),
+    Input('cancel-edit-btn', 'n_clicks'),
+    State('chart-edit-modal', 'is_open'),
+    prevent_initial_call=True
+)
+def close_modal(n_clicks, is_open):
+    """Close modal"""
+    return False
+
+# Callback to reset chart settings
+@app.callback(
+    [Output('edit-chart-title', 'value'), Output('edit-x-label', 'value'), Output('edit-y-label', 'value'),
+     Output('edit-chart-type', 'value'), Output('edit-color-scheme', 'value'), Output('edit-bg-color', 'value'),
+     Output('edit-plot-bg-color', 'value'), Output('edit-x-min', 'value'), Output('edit-x-max', 'value'),
+     Output('edit-x-scale', 'value'), Output('edit-x-gridlines', 'value'), Output('edit-y-min', 'value'),
+     Output('edit-y-max', 'value'), Output('edit-y-scale', 'value'), Output('edit-y-gridlines', 'value'),
+     Output('edit-show-legend', 'value'), Output('edit-legend-position', 'value'), Output('edit-legend-orientation', 'value'),
+     Output('edit-legend-bg', 'value'), Output('edit-legend-border', 'value'), Output('edit-font-size', 'value'),
+     Output('edit-title-font-size', 'value'), Output('edit-margin-top', 'value'), Output('edit-margin-bottom', 'value'),
+     Output('edit-margin-left', 'value'), Output('edit-margin-right', 'value'), Output('edit-chart-height', 'value'),
+     Output('edit-chart-width', 'value')],
+    Input('reset-chart-btn', 'n_clicks'),
+    prevent_initial_call=True
+)
+def reset_chart_settings(n_clicks):
+    """Reset all chart settings to defaults"""
+    return ('Chart Title', 'X Axis', 'Y Axis', 'scatter', 'default', '#FFFFFF', '#FFFFFF',
+            None, None, 'linear', True, None, None, 'linear', True, True, 'top right', 'v',
+            '#FFFFFF', '#000000', 12, 16, 80, 80, 80, 80, 600, 800)
+
+# Callback to apply chart changes
+@app.callback(
+    [Output('chart-configs', 'data', allow_duplicate=True), Output('chart-edit-modal', 'is_open', allow_duplicate=True)],
+    Input('apply-chart-btn', 'n_clicks'),
+    [State('editing-chart-id', 'data'), State('edit-chart-title', 'value'), State('edit-x-label', 'value'),
+     State('edit-y-label', 'value'), State('edit-chart-type', 'value'), State('edit-color-scheme', 'value'),
+     State('edit-bg-color', 'value'), State('edit-plot-bg-color', 'value'), State('edit-x-min', 'value'),
+     State('edit-x-max', 'value'), State('edit-x-scale', 'value'), State('edit-x-gridlines', 'value'),
+     State('edit-y-min', 'value'), State('edit-y-max', 'value'), State('edit-y-scale', 'value'),
+     State('edit-y-gridlines', 'value'), State('edit-show-legend', 'value'), State('edit-legend-position', 'value'),
+     State('edit-legend-orientation', 'value'), State('edit-legend-bg', 'value'), State('edit-legend-border', 'value'),
+     State('edit-font-size', 'value'), State('edit-title-font-size', 'value'), State('edit-margin-top', 'value'),
+     State('edit-margin-bottom', 'value'), State('edit-margin-left', 'value'), State('edit-margin-right', 'value'),
+     State('edit-chart-height', 'value'), State('edit-chart-width', 'value'), State('chart-configs', 'data')],
+    prevent_initial_call=True
+)
+def apply_chart_changes(n_clicks, chart_id, title, x_label, y_label, chart_type, color_scheme, bg_color, plot_bg_color,
+                       x_min, x_max, x_scale, x_grid, y_min, y_max, y_scale, y_grid, show_legend, legend_pos,
+                       legend_orient, legend_bg, legend_border, font_size, title_font_size, margin_t, margin_b,
+                       margin_l, margin_r, height, width, current_configs):
+    """Apply chart configuration changes"""
+    if not chart_id:
+        return dash.no_update, False
+    
+    if current_configs is None:
+        current_configs = {}
+    
+    schemes = get_color_schemes()
+    colors = schemes.get(color_scheme, {}).get('colors', ['#1f77b4'])
+    
+    config = {
+        'title': title, 'x_label': x_label, 'y_label': y_label, 'chart_type': chart_type,
+        'color_scheme': color_scheme, 'colors': colors, 'bg_color': bg_color, 'plot_bg_color': plot_bg_color,
+        'x_axis': {'min': x_min, 'max': x_max, 'scale': x_scale, 'gridlines': x_grid},
+        'y_axis': {'min': y_min, 'max': y_max, 'scale': y_scale, 'gridlines': y_grid},
+        'legend': {'show': show_legend, 'position': legend_pos, 'orientation': legend_orient,
+                  'bg_color': legend_bg, 'border_color': legend_border},
+        'font_size': font_size, 'title_font_size': title_font_size,
+        'margins': {'top': margin_t, 'bottom': margin_b, 'left': margin_l, 'right': margin_r},
+        'height': height, 'width': width
+    }
+    
+    current_configs[chart_id] = config
+    return current_configs, False
+
+
+# ============================================================================
+# DRAG-AND-DROP LAYOUT CALLBACKS
+# ============================================================================
+
+# Callback to reset layout
+@app.callback(
+    [Output('chart-layout', 'data'), Output('layout-status', 'children'), Output('layout-status', 'style')],
+    Input('reset-layout-btn', 'n_clicks'),
+    prevent_initial_call=True
+)
+def reset_layout(n_clicks):
+    """Reset chart layout to default order"""
+    status_message = html.Div([
+        html.I(className="fas fa-check-circle", style={'marginRight': '8px', 'color': COLORS['success']}),
+        "Layout reset successfully!"
+    ])
+    status_style = {
+        'marginTop': '10px',
+        'padding': '10px',
+        'borderRadius': '4px',
+        'fontSize': '12px',
+        'backgroundColor': '#d4edda',
+        'color': '#155724',
+        'display': 'block'
+    }
+    return [], status_message, status_style
 
 # ============================================================================
 # RUN THE APP
