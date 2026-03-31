@@ -1077,6 +1077,14 @@ app.index_string = '''
         {%favicon%}
         {%css%}
         <style>
+            * {
+                box-sizing: border-box;
+            }
+            body {
+                overflow-x: hidden;
+                margin: 0;
+                padding: 0;
+            }
             .stats-btn, .ml-btn, .export-btn, .template-btn {
                 width: 100%;
                 margin: 5px 0;
@@ -1335,7 +1343,8 @@ app.layout = html.Div([
                 'borderColor': COLORS['primary'],
                 'borderRadius': '10px',
                 'textAlign': 'center',
-                'margin': '10px',
+                'margin': '10px 0',
+                'boxSizing': 'border-box',
                 'backgroundColor': COLORS['card'],
                 'cursor': 'pointer'
             },
@@ -1375,7 +1384,7 @@ app.layout = html.Div([
                             ],
                             style={'marginBottom': '10px'}
                         )
-                    ], className='three columns'),
+                    ], className='four columns'),
                     html.Div([
                         html.Label("X-Axis"),
                         dcc.Dropdown(id='x-axis-dropdown', style={'marginBottom': '10px'})
@@ -1391,12 +1400,26 @@ app.layout = html.Div([
                     html.Div([
                         html.Label("Size"),
                         dcc.Dropdown(id='size-dropdown', style={'marginBottom': '10px'})
-                    ], className='two columns'),
-                    html.Div([
-                        html.Button('Add Chart', id='add-chart-button', n_clicks=0,
-                                   style={'width': '100%', 'backgroundColor': COLORS['primary'], 'color': 'white', 'border': 'none', 'padding': '10px', 'borderRadius': '5px'})
-                    ], className='one columns')
+                    ], className='two columns')
                 ], className='row'),
+                html.Div([
+                    html.Button('Add Chart', id='add-chart-button', n_clicks=0,
+                               style={
+                                   'width': '200px', 
+                                   'backgroundColor': COLORS['primary'], 
+                                   'color': 'white', 
+                                   'border': 'none', 
+                                   'padding': '10px', 
+                                   'borderRadius': '5px',
+                                   'fontWeight': 'bold',
+                                   'cursor': 'pointer',
+                                   'boxShadow': '0 2px 4px rgba(0,0,0,0.1)',
+                                   'textAlign': 'center',
+                                   'display': 'flex',
+                                   'justifyContent': 'center',
+                                   'alignItems': 'center'
+                               })
+                ], className='row', style={'display': 'flex', 'justifyContent': 'center', 'alignItems': 'center', 'marginTop': '15px', 'marginBottom': '15px'}),
             ]),
             
             # Filter Panel
@@ -1652,7 +1675,7 @@ app.layout = html.Div([
             ])
 
             
-        ], className='twelve columns', style={'backgroundColor': COLORS['card'], 'padding': '20px', 'borderRadius': '10px', 'margin': '10px', 'boxShadow': '0 2px 4px rgba(0,0,0,0.1)'}),
+        ], className='twelve columns', style={'backgroundColor': COLORS['card'], 'padding': '20px', 'borderRadius': '10px', 'margin': '10px auto', 'width': 'calc(100% - 20px)', 'boxShadow': '0 2px 4px rgba(0,0,0,0.1)'}),
         
         # Main Dashboard Area
         html.Div([
@@ -1864,7 +1887,7 @@ app.layout = html.Div([
                style={'textAlign': 'center', 'margin': '20px 0', 'color': COLORS['text']})
     ], style={'backgroundColor': COLORS['background'], 'padding': '10px'})
     
-], style={'backgroundColor': COLORS['background'], 'minHeight': '100vh'})
+], style={'backgroundColor': COLORS['background'], 'minHeight': '100vh', 'overflowX': 'hidden', 'maxWidth': '100%'})
 
 # ============================================================================
 # CALLBACKS
